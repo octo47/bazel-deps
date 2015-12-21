@@ -2,7 +2,6 @@ package braintree;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
 import org.eclipse.aether.DefaultRepositorySystemSession;
 import org.eclipse.aether.RepositorySystem;
@@ -16,6 +15,9 @@ import org.eclipse.aether.graph.DependencyNode;
 import org.eclipse.aether.impl.DefaultServiceLocator;
 import org.eclipse.aether.repository.LocalRepository;
 import org.eclipse.aether.repository.RemoteRepository;
+import org.eclipse.aether.resolution.ArtifactRequest;
+import org.eclipse.aether.resolution.ArtifactResolutionException;
+import org.eclipse.aether.resolution.ArtifactResult;
 import org.eclipse.aether.spi.connector.RepositoryConnectorFactory;
 import org.eclipse.aether.spi.connector.transport.TransporterFactory;
 import org.eclipse.aether.transport.file.FileTransporterFactory;
@@ -24,24 +26,31 @@ import org.eclipse.aether.util.graph.visitor.FilteringDependencyVisitor;
 import org.eclipse.aether.util.graph.visitor.PreorderNodeListGenerator;
 
 import java.net.URI;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 public class Maven {
 
+
   private final RepositorySystem system;
   private final DefaultRepositorySystemSession session;
   private final List<RemoteRepository> repositories;
 
-  public Maven(List<URI> repoList) {
+  public Maven(List<String> repoList) {
     system = newRepositorySystem();
     session = newRepositorySystemSession(system);
     repositories = repositories(repoList);
   }
 
-  public Set<Artifact> transitiveDependencies(Artifact artifact, Set<String> excluded) {
+  /**
+   * Resolve transitive dependencies
+   *
+   * @param artifact what to resolve
+   * @param excluded set of excluded artifacts
+   * @return map of { artifact -> repo }
+   */
+  public Set<ArtifactLocation> transitiveDependencies(Artifact artifact, Set<String> excluded) {
 
     System.err.println("Collecting artifacts for " + artifact.getArtifactId() + "...\n");
 
@@ -49,7 +58,7 @@ public class Maven {
     collectRequest.setRoot(new Dependency(artifact, ""));
     collectRequest.setRepositories(repositories);
 
-    CollectResult collectResult = null;
+    CollectResult collectResult;
     try {
       collectResult = system.collectDependencies(session, collectRequest);
     } catch (DependencyCollectionException e) {
@@ -63,12 +72,23 @@ public class Maven {
     return ImmutableSet.copyOf(
         visitor.getNodes().stream()
             .filter(d -> !d.getDependency().isOptional())
-            .map(DependencyNode::getArtifact)
-            .map((Artifact a) -> {
-              System.err.println("    " + a.getArtifactId() + " as dependency");
-              return a;
+            .map((d) -> {
+              ArtifactResult result = resolveArtifact(d);
+              return new ArtifactLocation(result.getArtifact(), result.getRepository().getId());
             })
-            .collect(Collectors.toList()));
+            .collect(Collectors.toSet()));
+  }
+
+  private ArtifactResult resolveArtifact(DependencyNode d) {
+    ArtifactRequest request = new ArtifactRequest();
+    request.setArtifact(d.getArtifact());
+    request.setDependencyNode(d);
+    request.setRepositories(d.getRepositories());
+    try {
+      return system.resolveArtifact(session, request);
+    } catch (ArtifactResolutionException e) {
+      throw new RuntimeException(e);
+    }
   }
 
   private RepositorySystem newRepositorySystem() {
@@ -97,16 +117,58 @@ public class Maven {
   }
 
 
-  static URI central = URI.create("http://central.maven.org/maven2/");
+  static String central = "central@http://central.maven.org/maven2/";
 
-  public List<RemoteRepository> repositories(List<URI> repoList) {
-    LinkedHashSet<URI> givenUrls = Sets.newLinkedHashSet(repoList);
-    if (!givenUrls.contains(central)) {
-      givenUrls.add(central);
-    }
-    final int[] id = {0};
-    return Lists.transform(repoList, uri -> new RemoteRepository.Builder("uri" + id[0]++,
-        "default",
-        uri.toASCIIString()).build());
+  public List<RemoteRepository> repositories(List<String> repoList) {
+    List<String> list = Lists.newArrayList(central);
+    list.addAll(repoList);
+    return list.stream().map((String repo) -> {
+      String[] parts = repo.split("@", 2);
+      if (parts.length != 2) {
+        throw new IllegalArgumentException("Expected repo in form of: id@uri");
+      }
+      System.out.format("Adding repo: %s %s\n", parts[0], parts[1]);
+      return new RemoteRepository.Builder(
+          parts[0],
+          "default",
+          URI.create(parts[1]).toASCIIString()).build();
+    }).collect(Collectors.toList());
   }
+
+  public List<RemoteRepository> getRepositories() {
+    return repositories;
+  }
+
+  /**
+   * Describes artifact location
+   */
+  public static class ArtifactLocation {
+    public final Artifact artifact;
+    public final String repoId;
+
+    public ArtifactLocation(Artifact artifact, String repoId) {
+      this.artifact = artifact;
+      this.repoId = repoId;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+
+      ArtifactLocation that = (ArtifactLocation) o;
+
+      if (artifact != null ? !artifact.equals(that.artifact) : that.artifact != null) return false;
+      return repoId != null ? repoId.equals(that.repoId) : that.repoId == null;
+
+    }
+
+    @Override
+    public int hashCode() {
+      int result = artifact != null ? artifact.hashCode() : 0;
+      result = 31 * result + (repoId != null ? repoId.hashCode() : 0);
+      return result;
+    }
+  }
+
 }
