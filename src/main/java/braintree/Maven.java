@@ -1,16 +1,11 @@
 package braintree;
 
-import java.util.List;
-import java.util.Set;
-import java.util.stream.Collectors;
-
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
 import org.eclipse.aether.DefaultRepositorySystemSession;
 import org.eclipse.aether.RepositorySystem;
-import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.collection.CollectRequest;
 import org.eclipse.aether.collection.CollectResult;
@@ -25,19 +20,34 @@ import org.eclipse.aether.spi.connector.RepositoryConnectorFactory;
 import org.eclipse.aether.spi.connector.transport.TransporterFactory;
 import org.eclipse.aether.transport.file.FileTransporterFactory;
 import org.eclipse.aether.transport.http.HttpTransporterFactory;
+import org.eclipse.aether.util.graph.visitor.FilteringDependencyVisitor;
 import org.eclipse.aether.util.graph.visitor.PreorderNodeListGenerator;
+
+import java.net.URI;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 public class Maven {
 
-  public static Set<Artifact> transitiveDependencies(Artifact artifact) {
+  private final RepositorySystem system;
+  private final DefaultRepositorySystemSession session;
+  private final List<RemoteRepository> repositories;
 
-    RepositorySystem system = newRepositorySystem();
+  public Maven(List<URI> repoList) {
+    system = newRepositorySystem();
+    session = newRepositorySystemSession(system);
+    repositories = repositories(repoList);
+  }
 
-    RepositorySystemSession session = newRepositorySystemSession(system);
+  public Set<Artifact> transitiveDependencies(Artifact artifact, Set<String> excluded) {
+
+    System.err.println("Collecting artifacts for " + artifact.getArtifactId() + "...\n");
 
     CollectRequest collectRequest = new CollectRequest();
     collectRequest.setRoot(new Dependency(artifact, ""));
-    collectRequest.setRepositories(repositories());
+    collectRequest.setRepositories(repositories);
 
     CollectResult collectResult = null;
     try {
@@ -47,16 +57,21 @@ public class Maven {
     }
 
     PreorderNodeListGenerator visitor = new PreorderNodeListGenerator();
-    collectResult.getRoot().accept(visitor);
+    collectResult.getRoot().accept(new FilteringDependencyVisitor(visitor,
+        (node, parents) -> !excluded.contains(node.getArtifact().toString())));
 
     return ImmutableSet.copyOf(
-      visitor.getNodes().stream()
-        .filter(d -> !d.getDependency().isOptional())
-        .map(DependencyNode::getArtifact)
-        .collect(Collectors.toList()));
+        visitor.getNodes().stream()
+            .filter(d -> !d.getDependency().isOptional())
+            .map(DependencyNode::getArtifact)
+            .map((Artifact a) -> {
+              System.err.println("    " + a.getArtifactId() + " as dependency");
+              return a;
+            })
+            .collect(Collectors.toList()));
   }
 
-  private static RepositorySystem newRepositorySystem() {
+  private RepositorySystem newRepositorySystem() {
     DefaultServiceLocator locator = MavenRepositorySystemUtils.newServiceLocator();
     locator.addService(RepositoryConnectorFactory.class, BasicRepositoryConnectorFactory.class);
     locator.addService(TransporterFactory.class, FileTransporterFactory.class);
@@ -72,18 +87,26 @@ public class Maven {
     return locator.getService(RepositorySystem.class);
   }
 
-  public static DefaultRepositorySystemSession newRepositorySystemSession(RepositorySystem system) {
+  public DefaultRepositorySystemSession newRepositorySystemSession(RepositorySystem system) {
     DefaultRepositorySystemSession session = MavenRepositorySystemUtils.newSession();
 
-    LocalRepository localRepo = new LocalRepository("target/local-repo");
+    LocalRepository localRepo = new LocalRepository("/tmp/bazel-deps-repo");
     session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
 
     return session;
   }
 
-  public static List<RemoteRepository> repositories() {
-    return ImmutableList.of(
-      new RemoteRepository.Builder("central", "default", "http://central.maven.org/maven2/")
-        .build());
+
+  static URI central = URI.create("http://central.maven.org/maven2/");
+
+  public List<RemoteRepository> repositories(List<URI> repoList) {
+    LinkedHashSet<URI> givenUrls = Sets.newLinkedHashSet(repoList);
+    if (!givenUrls.contains(central)) {
+      givenUrls.add(central);
+    }
+    final int[] id = {0};
+    return Lists.transform(repoList, uri -> new RemoteRepository.Builder("uri" + id[0]++,
+        "default",
+        uri.toASCIIString()).build());
   }
 }

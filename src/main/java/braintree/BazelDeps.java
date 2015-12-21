@@ -1,16 +1,6 @@
 package braintree;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
-
+import com.google.common.collect.Lists;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.collection.DependencyCollectionException;
@@ -19,10 +9,17 @@ import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
 
+import java.net.URI;
+import java.util.*;
+import java.util.stream.Collectors;
+
 public class BazelDeps {
 
   @Option(name = "-x", usage = "Exclude a libraries dependencies")
-  private String excludeArtifact;
+  private List<String> excludeArtifacts = Lists.newArrayList();
+
+  @Option(name = "-r", usage = "Enumerate maven repositories")
+  private List<URI> repoUris = Lists.newArrayList();
 
   @Argument(usage = "<artifact id>")
   private List<String> artifactNames = new ArrayList<>();
@@ -41,63 +38,62 @@ public class BazelDeps {
       System.out.println();
       parser.printUsage(System.out);
       System.out.println(
-        "\nExample: java -jar bazel-deps-1.0-SNAPSHOT com.fasterxml.jackson.core:jackson-databind:2.5.0");
+          "\nExample: java -jar bazel-deps-1.0-SNAPSHOT com.fasterxml.jackson.core:jackson-databind:2.5.0");
       System.exit(1);
     }
 
     System.err.println("Fetching dependencies from maven...\n");
 
-    Map<Artifact, Set<Artifact>> dependencies = fetchDependnecies(artifactNames);
+    Maven mvn = new Maven(repoUris);
 
-    Set<Artifact> excludeDependencies =
-      excludeArtifact != null ? Maven.transitiveDependencies(new DefaultArtifact(excludeArtifact))
-                              : ImmutableSet.of();
+    Set<String> excludeDependencies =
+        excludeArtifacts.stream().map(s -> new DefaultArtifact(s).toString()).collect(Collectors.toSet());
 
-    printWorkspace(dependencies, excludeDependencies);
-    printBuildEntries(dependencies, excludeDependencies);
+    Map<Artifact, Set<Artifact>> dependencies = fetchDependencies(mvn, artifactNames, excludeDependencies);
+
+    printWorkspace(dependencies);
+    printBuildEntries(dependencies);
   }
 
-  private Map<Artifact, Set<Artifact>> fetchDependnecies(List<String> artifactNames) {
+  private Map<Artifact, Set<Artifact>> fetchDependencies(Maven mvn,
+                                                         List<String> artifactNames,
+                                                         Set<String> excludeDependencies) {
     Map<Artifact, Set<Artifact>> dependencies = new HashMap<>();
 
     artifactNames.stream()
-      .map(DefaultArtifact::new)
-      .forEach(artifact -> dependencies.put(artifact, Maven.transitiveDependencies(artifact)));
+        .map(DefaultArtifact::new)
+        .forEach(artifact -> dependencies.put(artifact, mvn.transitiveDependencies(artifact, excludeDependencies)));
     return dependencies;
   }
 
-  private void printWorkspace(Map<Artifact, Set<Artifact>> dependencies,
-                              Set<Artifact> excludeDepenencies) {
+  private void printWorkspace(Map<Artifact, Set<Artifact>> dependencies) {
     System.out.println("\n\n--------- Add these lines to your WORKSPACE file ---------\n");
     dependencies.values().stream()
-      .flatMap(Collection::stream)
-      .filter(artifact -> !excludeDepenencies.contains(artifact))
-      .sorted(Comparator.comparing(Artifact::getArtifactId))
-      .forEach(artifact -> {
-        System.out.format("maven_jar(name = \"%s\", artifact = \"%s\")\n", artifactName(artifact),
-                          artifact.toString());
-      });
+        .flatMap(Collection::stream)
+        .sorted(Comparator.comparing(Artifact::getArtifactId))
+        .forEach(artifact -> {
+          System.out.format("maven_jar(name = \"%s\", artifact = \"%s\")\n", artifactName(artifact),
+              artifact.toString());
+        });
   }
 
-  private void printBuildEntries(Map<Artifact, Set<Artifact>> dependencies,
-                                 Set<Artifact> excludeDependencies) {
+  private void printBuildEntries(Map<Artifact, Set<Artifact>> dependencies) {
     System.out.println("\n\n--------- Add these lines to your BUILD file ---------\n");
     dependencies.entrySet().stream()
-      .sorted((e1, e2) -> e1.getKey().getArtifactId().compareTo(e2.getKey().getArtifactId()))
-      .forEach(entry -> printForBuildFile(entry.getKey(), entry.getValue(), excludeDependencies));
+        .sorted((e1, e2) -> e1.getKey().getArtifactId().compareTo(e2.getKey().getArtifactId()))
+        .forEach(entry -> printForBuildFile(entry.getKey(), entry.getValue()));
   }
 
-  private static void printForBuildFile(Artifact artifact, Set<Artifact> dependencies,
-                                        Set<Artifact> excludeDependencies) {
+  private static void printForBuildFile(Artifact artifact, Set<Artifact> dependencies) {
     System.out.println("java_library(");
     System.out.println("  name=\"" + artifact.getArtifactId() + "\",");
     System.out.println("  visibility = [\"//visibility:public\"],");
     System.out.println("  exports = [");
 
-    Sets.difference(dependencies, excludeDependencies).stream()
-      .map(d -> String.format("    \"@%s//jar\",", artifactName(d)))
-      .sorted()
-      .forEach(System.out::println);
+    dependencies.stream()
+        .map(d -> String.format("    \"@%s//jar\",", artifactName(d)))
+        .sorted()
+        .forEach(System.out::println);
 
     System.out.println("  ],");
     System.out.println(")\n");
